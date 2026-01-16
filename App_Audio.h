@@ -10,7 +10,7 @@
 #include "freertos/ringbuf.h" 
 
 // [核心] 统一采样率 16000
-#define AUDIO_SAMPLE_RATE  16000 
+#define AUDIO_SAMPLE_RATE  24000 
 // [核心] 播放缓冲大小
 #define PLAY_BUFFER_SIZE   (1024 * 200)
 
