@@ -1,0 +1,115 @@
+#include "App_Sys.h"
+#include <math.h> 
+#include "Pin_Config.h"
+
+AppSys MySys;
+
+// --- NTC 热敏电阻参数 ---
+const float R7_VAL  = 8200.0;    // 上拉电阻 8.2K
+const float R48_VAL = 200000.0;  // 下拉电阻 200K
+const float VCC     = 3300.0;    // 系统电压 3.3V
+const float NTC_R0  = 100000.0;  // 25°C 阻值 100K
+const float NTC_B   = 3950.0;    // B值
+const float NTC_T0  = 298.15;    // 25°C 的开尔文温度
+
+// [关键修改] 改为 extern，表示引用 main 文件中的定义，而不是重新定义
+extern volatile float g_SystemTemp; 
+
+void AppSys::init() {
+    // 1. 温度 ADC 初始化
+    analogReadResolution(12);       
+    analogSetAttenuation(ADC_11db); 
+    pinMode(PIN_ADC_TEMP, INPUT);
+
+    // 2. 按键初始化
+    #ifdef PIN_KEY2
+    pinMode(PIN_KEY2, INPUT_PULLUP);
+    #endif
+
+    Serial.println("[Sys] System Monitor Initialized.");
+}
+
+// 使用 Steinhart-Hart 算法的高精度测温
+float AppSys::getTemperatureC() {
+    // 1. 读取毫伏值
+    int raw_mv = analogReadMilliVolts(PIN_ADC_TEMP);
+
+    // 2. 异常过滤
+    if (raw_mv < 100 || raw_mv > 3200) return -99.0; 
+
+    // 3. 计算阻值
+    float r_total = (VCC * R48_VAL) / (float)raw_mv;
+    float r_ntc = r_total - R7_VAL - R48_VAL;
+
+    // 4. 计算温度
+    if (r_ntc > 0) {
+        float ln_ratio = log(r_ntc / NTC_R0);
+        float kelvin = 1.0 / ( (1.0 / NTC_T0) + (ln_ratio / NTC_B) );
+        return kelvin - 273.15; // 转为摄氏度
+    }
+    
+    return 0.0;
+}
+
+uint32_t AppSys::getFreeHeap() {
+    return ESP.getFreeHeap();
+}
+
+void AppSys::scanLoop() {
+    static unsigned long lastLogTime = 0;
+    
+    if (millis() - lastLogTime > 3000) {
+        lastLogTime = millis();
+        
+        float t = getTemperatureC();
+        
+        // 这里的赋值是安全的，因为它引用的是 .ino 里的那个变量
+        g_SystemTemp = t; 
+        
+        if (t > 85.0) {
+             Serial.println("[Sys] !!! OVERHEAT WARNING !!!");
+        }
+    }
+}
+
+// 按键逻辑
+KeyAction AppSys::getKeyAction() {
+    static bool lastState = HIGH; 
+    
+    #ifdef PIN_KEY2
+    bool currentState = digitalRead(PIN_KEY2);
+    #else
+    bool currentState = HIGH;
+    #endif
+
+    KeyAction action = KEY_NONE;
+
+    if (lastState == HIGH && currentState == LOW) {
+        _pressStartTime = millis();
+        _isLongPressHandled = false;
+    }
+    
+    if (currentState == LOW) {
+        if (millis() - _pressStartTime > 800) { 
+            if (!_isLongPressHandled) {
+                action = KEY_LONG_PRESS_START; 
+                _isLongPressHandled = true;   
+            } else {
+                action = KEY_LONG_PRESS_HOLD; 
+            }
+        }
+    }
+    
+    if (lastState == LOW && currentState == HIGH) {
+        if (_isLongPressHandled) {
+            action = KEY_LONG_PRESS_END;
+        } else {
+            if (millis() - _pressStartTime > 50) {
+                action = KEY_SHORT_PRESS;
+            }
+        }
+    }
+    
+    lastState = currentState;
+    return action;
+}
