@@ -22,7 +22,6 @@ bool App4G::waitResponse(const char* expected, uint32_t timeout) {
         if (_serial4G->available()) {
             char c = _serial4G->read();
             
-            // 【关键】打印 4G 模块的回复，方便你看到报错
             Serial.write(c); 
             
             recv += c;
@@ -104,12 +103,6 @@ bool App4G::connectTCP(const char* host, uint16_t port) {
     _serial4G->println("AT+MIPCLOSE=1"); 
     waitResponse("OK", 500);    
 
-    // [删除] 既然之前报错 ERROR，说明模块不支持或不需要这个设置
-    // 而且我们需要发送原始二进制，不设置反而更好！
-    // _serial4G->println("AT+GTSET=\"IPRFMT\",2"); 
-    // waitResponse("OK", 1000);
-
-    // 2. 双重保险：检查是否有 IP，没有则激活
     // (防止 AT+MIPCALL=1 之后过一会掉线)
     _serial4G->println("AT+MIPCALL?");
     // 如果回复 +MIPCALL: 0 说明没 IP
