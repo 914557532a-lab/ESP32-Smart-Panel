@@ -175,6 +175,11 @@ def send_as_hex_protocol(sock, data, label="Data"):
         while sent < total:
             end = min(sent + chunk_size, total)
             sock.sendall(hex_data[sent:end])
+            
+            # [Fix] Insert Sync Marker (Newline) every 1KB
+            # This allows the ESP32 to reset its hex decoder if a byte was dropped
+            sock.sendall(b'\n') 
+            
             sent = end
             # 微小延时，给 ESP32 逐字节处理的时间 (C++里有 vTaskDelay)
             time.sleep(0.005)

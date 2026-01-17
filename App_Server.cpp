@@ -150,6 +150,12 @@ void AppServer::chatWithServer(Client* networkClient) {
             continue;
         }
 
+        // [New] Protocol Sync: Reset decoder on Newline
+        if (c == '\n') {
+            pairIdx = 0; // Reset Hex Decoder
+            continue;    // Skip the newline char
+        }
+
         startTime = millis(); // 喂狗，保持连接活跃
 
         if (!jsonDone) {
@@ -211,8 +217,15 @@ void AppServer::chatWithServer(Client* networkClient) {
     if (isWiFi) networkClient->stop();
     else My4G.closeTCP();
     
+
     // 5. 开始播放 (Playback Phase)
     if (audio_received_len > 0) {
+        // [Fix] Enforce Even Length (Align to 16-bit)
+        if (audio_received_len % 2 != 0) {
+            audio_received_len--; 
+            Serial.println("[Server] Truncated 1 byte to align PCM.");
+        }
+
         Serial.printf("[Server] Start Playing Buffered Audio: %d bytes\n", audio_received_len);
         MyUILogic.updateAssistantStatus("正在回复");
         
@@ -234,6 +247,15 @@ void AppServer::chatWithServer(Client* networkClient) {
             
             // 喂狗，防止播放时间过长导致重启
             vTaskDelay(2); 
+        }
+
+        // [Fix] Append Silence Padding (2KB Zeros)
+        // Eliminates static/pop noise at the end of playback
+        Serial.println("[Server] Appending Silence Padding...");
+        uint8_t silence_buf[512] = {0}; 
+        for(int i=0; i<4; i++) { // 4 * 512 = 2048 bytes
+             MyAudio.pushToPlayBuffer(silence_buf, 512);
+             vTaskDelay(2);
         }
     } else {
         Serial.println("[Server] No Audio received.");
