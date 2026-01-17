@@ -8,8 +8,11 @@ import struct
 import requests
 import time
 import traceback
+import re
 from pathlib import Path
 from dashscope.audio.tts import SpeechSynthesizer 
+from dashscope import Generation
+from dashscope.audio.asr import Recognition
 
 # ================= 配置区 =================
 API_KEY = "sk-f8cf143d90c248a9871c7da220dad9da"
@@ -41,13 +44,39 @@ FAN_MAP = {"自动":0xA0,"低":0xE0,"中":0x80,"高":0x40}
 def generate_ir_code(command_data):
     if not command_data or not command_data.get("has_command"): return None
     if command_data.get("target") != "空调": return None
-    action, value = command_data.get("action"), command_data.get("value")
-    current_temp, current_mode, current_fan = 26, "制冷", "自动"
-    if value:
-        if value.isdigit() and 17 <= int(value) <= 30: current_temp = int(value)
-        elif value in ["高", "中", "低", "自动"]: current_fan = value
-        elif value in ["制冷", "制热", "送风", "除湿"]: current_mode = value
-    if action == "关闭": return None
+    
+    # Default values
+    current_temp = 26
+    current_mode = "制冷"
+    current_fan = "自动"
+    
+    # Parse params
+    params = command_data.get("params", {})
+    if params:
+        t = params.get("temperature")
+        if t is not None:
+             try:
+                 t_int = int(t)
+                 if 17 <= t_int <= 30: current_temp = t_int
+             except: pass
+             
+        m = params.get("mode")
+        if m in ["制冷", "制热", "送风", "除湿", "自动"]: current_mode = m
+        
+        f = params.get("fan")
+        if f in ["高", "中", "低", "自动"]: current_fan = f
+    
+    # Fallback for legacy simple "value" if params is empty (compatibility)
+    elif "value" in command_data:
+        val = command_data.get("value")
+        if val:
+            if str(val).isdigit() and 17 <= int(val) <= 30: current_temp = int(val)
+            elif val in ["高", "中", "低", "自动"]: current_fan = val
+            elif val in ["制冷", "制热", "送风", "除湿"]: current_mode = val
+
+    action = command_data.get("action")
+    if action == "关闭": return None # TODO: Add OFF code if needed, currently None implies no IR sending or special handling?
+    # User previous code returned None for Close.
     
     b0, b1 = 0xB2, 0x4D
     b2 = FAN_MAP.get(current_fan, 0xA0)
@@ -214,8 +243,53 @@ def recv_all(sock, n):
 def get_ai_analysis(file_path):
     print(f"{COLOR_BLUE}>>> [AI] 分析语音...{COLOR_RESET}")
     file_url = str(Path(file_path).resolve())
+    
+    # 1. ASR: Speech to Text
+    text = ""
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": [{"text": ""}] 
+            },
+            {
+                "role": "user",
+                "content": [{"audio": file_url}]
+            }
+        ]
+        res = dashscope.MultiModalConversation.call(
+            model='qwen3-asr-flash',
+            api_key=API_KEY,
+            messages=messages,
+            result_format='message'
+        )
+        if res.status_code == 200:
+            content = res.output.choices[0].message.content
+            if isinstance(content, list):
+                if content and "text" in content[0]:
+                     text = content[0]["text"]
+                else: 
+                     text = str(content)
+            else:
+                text = str(content)
+            print(f"{COLOR_BLUE}>>> [ASR] 识别结果: {text}{COLOR_RESET}")
+        else:
+            print(f"ASR Failed: {res.code} - {res.message}")
+            return {"reply": "我没听清。", "command": {"has_command": False}}
+            
+    except Exception as e:
+        print(f"ASR Exception: {e}")
+        return {"reply": "我耳朵不好使了。", "command": {"has_command": False}}
+
+    if not text: return {"reply": "我没听见声音。", "command": {"has_command": False}}
+
+
+    # 2. NLU: Text to Intent
     system_prompt = """
-    你是一个车载智能助手。请分析用户的语音意图，控制"空调"。
+    你是一个车载智能助手。请分析用户的文字指令，控制"空调"。
+    【重要】空调温度必须在 16-30 度之间。
+    如果你看到文字类似 "二度" 或 "三度"（可能由语音识别错误导致），请结合语境修正为合理的数值（如 22, 23）。
+    但如果用户明确说 "23度"，则必须保留 23。
     必须严格输出且仅输出一个合法的 JSON 对象。
     JSON 格式定义如下：
     {
@@ -224,27 +298,35 @@ def get_ai_analysis(file_path):
             "has_command": true/false, 
             "target": "空调", 
             "action": "打开" | "关闭" | "调节" | null, 
-            "value": "25" | "高" | "低" | "制冷" | "制热" | null 
+            "params": {
+                "temperature": 17-30 | null,
+                "mode": "制冷" | "制热" | "送风" | "除湿" | "自动" | null,
+                "fan": "高" | "中" | "低" | "自动" | null
+            }
         }
     }
     """
     try:
-        response = dashscope.MultiModalConversation.call(
-            model="qwen-audio-turbo-latest",
+        response = Generation.call(
+            model="qwen-turbo",
             api_key=API_KEY,
             messages=[
-                {"role": "system", "content": [{"text": system_prompt}]},
-                {"role": "user", "content": [{"audio": file_url}]}
-            ]
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            result_format='message'
         )
         if response.status_code == 200:
-            content = response["output"]["choices"][0]["message"]["content"]
-            txt = content[0]["text"] if isinstance(content, list) else str(content)
-            txt = txt.replace("```json", "").replace("```", "").strip()
-            return json.loads(txt)
+            content = response.output.choices[0].message.content
+            content = content.replace("```json", "").replace("```", "").strip()
+            print(f"{COLOR_BLUE}>>> [NLU] 理解结果: {content}{COLOR_RESET}")
+            return json.loads(content)
+        else:
+            print(f"NLU Failed: {response.code} - {response.message}")
     except Exception as e:
-        print(f"AI Error: {e}")
-    return {"reply": "我没听清。", "command": {"has_command": False}}
+        print(f"NLU Exception: {e}")
+        
+    return {"reply": "我没理解你的意思。", "command": {"has_command": False}}
 
 from dashscope.audio.tts import SpeechSynthesizer 
 
@@ -335,6 +417,41 @@ def start_server():
                 
                 print(f"解码并保存: {len(pcm_data)} bytes PCM")
             ai_res = get_ai_analysis(RECEIVED_AUDIO_FILE)
+            
+            # [Fix] Sanitize AI hallucinations (e.g. "2度" -> "22度")
+            def sanitize_ai_result(res):
+                cmd = res.get("command", {})
+                params = cmd.get("params", {})
+                if not params: return res
+                
+                temp = params.get("temperature")
+                reply = res.get("reply", "")
+                
+                if temp is not None and isinstance(temp, int):
+                    if temp < 16: 
+                        # Strategy 1: Trust Reply Text (Regex)
+                        # AI often says the right thing ("21度") but outputs wrong JSON ("2")
+                        match = re.search(r"(\d+)[度℃]", reply)
+                        if match:
+                            val = int(match.group(1))
+                            if 16 <= val <= 30:
+                                print(f"{COLOR_YELLOW}[Auto-Fix] 根据文本修正温度: {temp} -> {val}{COLOR_RESET}")
+                                params["temperature"] = val
+                                return res
+
+                        # Strategy 2: Heuristic Fallback (e.g. 2 -> 22)
+                        new_temp = 20 + temp 
+                        if new_temp > 30: new_temp = 26
+                        print(f"{COLOR_YELLOW}[Auto-Fix] 修正温度异常(启发式): {temp} -> {new_temp}{COLOR_RESET}")
+                        params["temperature"] = new_temp
+                        
+                        # Fix reply text if needed (only if text didn't match strategy 1)
+                        if str(temp) in reply:
+                             res["reply"] = reply.replace(str(temp), str(new_temp))
+                return res
+
+            ai_res = sanitize_ai_result(ai_res)
+
             reply = ai_res.get("reply", "我在")
             cmd = ai_res.get("command", {}) 
             ir_code = generate_ir_code(cmd)
@@ -346,7 +463,7 @@ def start_server():
                     "has_command": cmd.get("has_command", False),
                     "target": cmd.get("target"),
                     "action": cmd.get("action"),
-                    "value": cmd.get("value"),
+                    "params": cmd.get("params"),
                     "ir_code": ir_code 
                 }
             }
