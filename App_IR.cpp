@@ -79,6 +79,23 @@ void App_IR_Test_Send(void)
 
 void AppIR::loop() {
     if (_irRecv->decode(&_results)) {
+        // [新增] 打印详细的原始数据，用于分析未知协议
+        Serial.println("----------------------------------------------------------------");
+        Serial.printf("[IR] Signal Detected. Protocol: %s, Bits: %d\n", 
+                      typeToString(_results.decode_type).c_str(), _results.bits);
+        
+        // 打印原始时序数据 (Source Code 格式，可以直接复制用来发送)
+        String rawCode = resultToSourceCode(&_results);
+        Serial.println("--- Raw Source Code (cpp) ---");
+        Serial.println(rawCode);
+        
+        // 打印人类可读的时序信息
+        String timingInfo = resultToTimingInfo(&_results);
+         Serial.println("--- Timing Info ---");
+        Serial.println(timingInfo);
+        
+        Serial.println("----------------------------------------------------------------");
+
         if (_results.value != kRepeat) {
             IREvent evt;
             memset(&evt, 0, sizeof(IREvent));
@@ -93,9 +110,9 @@ void AppIR::loop() {
                 if (_results.bits % 8 != 0) byteCount++; 
                 if (byteCount > IR_STATE_SIZE) byteCount = IR_STATE_SIZE; 
                 for (int i = 0; i < byteCount; i++) evt.state[i] = _results.state[i];
-                Serial.printf("[IR] AC Signal Detected (Protocol: %s)\n", typeToString(_results.decode_type).c_str());
+                // Serial.printf("[IR] AC Signal Detected (Protocol: %s)\n", typeToString(_results.decode_type).c_str());
             } else {
-                Serial.printf("[IR] Normal Signal: 0x%llX\n", _results.value);
+                // Serial.printf("[IR] Normal Signal: 0x%llX\n", _results.value);
             }
             if (IRQueue_Handle != NULL) xQueueSend(IRQueue_Handle, &evt, 0);
         } 
